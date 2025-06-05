@@ -1,0 +1,3 @@
+- Read README.md
+- You can find (and store) knowledge to supplement your training in ai_docs/
+- If you search the web or view mainpages or command help, save the useful information in ai_docs/project/ or ai_docs/local, the latter being for things that should not be checked into the project's git repo.

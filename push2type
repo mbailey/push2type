@@ -1,0 +1,538 @@
+#!/bin/bash
+# Push2Type - Complete push-to-talk voice transcription daemon
+# Monitors CapsLock (F24) key and handles recording, transcription, and pasting
+
+set -e
+
+# Configuration
+RECORDINGS_DIR="$HOME/push2type_recordings"
+AUDIO_DEVICE="${AUDIO_DEVICE:-default}"
+SAMPLE_RATE="${SAMPLE_RATE:-44100}"
+AUDIO_FORMAT="${AUDIO_FORMAT:-wav}"
+COMPRESS_AUDIO="${COMPRESS_AUDIO:-true}"  # Enable audio compression for faster uploads
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Check dependencies
+check_deps() {
+    local missing=()
+    
+    command -v arecord >/dev/null || missing+=("alsa-utils")
+    command -v curl >/dev/null || missing+=("curl")
+    command -v jq >/dev/null || missing+=("jq")
+    command -v evtest >/dev/null || missing+=("evtest")
+    
+    # Check for audio compression tools (optional but recommended)
+    if [[ "$COMPRESS_AUDIO" == "true" ]]; then
+        if ! command -v lame >/dev/null && ! command -v ffmpeg >/dev/null; then
+            echo -e "${YELLOW}Warning: No audio compression available${NC}" >&2
+            echo -e "${YELLOW}Install lame or ffmpeg for faster uploads${NC}" >&2
+            COMPRESS_AUDIO="false"
+        fi
+    fi
+    
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo -e "${RED}Missing dependencies: ${missing[*]}${NC}"
+        echo "Install with: sudo dnf install ${missing[*]}"
+        exit 1
+    fi
+}
+
+# Check API key
+check_api_key() {
+    if [[ -z "$OPENAI_API_KEY" ]]; then
+        echo -e "${RED}Error: OPENAI_API_KEY environment variable not set${NC}"
+        echo "Set it with: export OPENAI_API_KEY='your-key-here'"
+        echo "Or create: ~/.config/push2type/environment"
+        exit 1
+    fi
+}
+
+# Record audio
+record_audio() {
+    local output_file="$1"
+    
+    echo -e "${BLUE}🎤 Recording...${NC}"
+    
+    # Record audio until interrupted with proper format
+    arecord -D "$AUDIO_DEVICE" -f S16_LE -r "$SAMPLE_RATE" -c 1 -t wav "$output_file" 2>/dev/null
+    
+    # Check if we got audio
+    local file_size=$(stat -c%s "$output_file" 2>/dev/null || echo 0)
+    if [[ $file_size -lt 1000 ]]; then
+        echo -e "${RED}No audio recorded${NC}"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Compress audio file for faster upload
+compress_audio() {
+    local input_file="$1"
+    local output_file="$2"
+    
+    if [[ "$COMPRESS_AUDIO" != "true" ]]; then
+        # No compression - just copy the file
+        cp "$input_file" "$output_file"
+        return 0
+    fi
+    
+    # Try lame first (MP3), then ffmpeg as fallback
+    if command -v lame >/dev/null; then
+        # Use lame for MP3 compression (good quality, fast encoding)
+        # Convert to mono, 64kbps (good enough for speech)
+        lame -q 2 -b 64 -m m "$input_file" "$output_file" 2>/dev/null
+    elif command -v ffmpeg >/dev/null; then
+        # Use ffmpeg for MP3 compression
+        ffmpeg -i "$input_file" -acodec libmp3lame -ab 64k -ac 1 -y "$output_file" 2>/dev/null
+    else
+        # Fallback - no compression
+        cp "$input_file" "$output_file"
+        return 0
+    fi
+    
+    # Check if compression succeeded
+    if [[ -f "$output_file" ]] && [[ -s "$output_file" ]]; then
+        local original_size=$(stat -c%s "$input_file" 2>/dev/null || echo 0)
+        local compressed_size=$(stat -c%s "$output_file" 2>/dev/null || echo 0)
+        local ratio=$((compressed_size * 100 / original_size))
+        echo "Compressed: ${original_size} → ${compressed_size} bytes (${ratio}%)" >&2
+        return 0
+    else
+        # Compression failed - use original
+        echo "Compression failed, using original file" >&2
+        cp "$input_file" "$output_file"
+        return 1
+    fi
+}
+
+# Transcribe audio using OpenAI Whisper
+transcribe_audio() {
+    local audio_file="$1"
+    local base_url="${OPENAI_BASE_URL:-https://api.openai.com}"
+    
+    # Compress audio for faster upload if enabled
+    local upload_file="$audio_file"
+    if [[ "$COMPRESS_AUDIO" == "true" ]]; then
+        local compressed_file="${audio_file%.*}.mp3"
+        if compress_audio "$audio_file" "$compressed_file"; then
+            upload_file="$compressed_file"
+        fi
+    fi
+    
+    echo -e "${YELLOW}🔄 Transcribing...${NC}" >&2
+    
+    local response=$(curl -s \
+        -H "Authorization: Bearer $OPENAI_API_KEY" \
+        -F "file=@$upload_file" \
+        -F "model=whisper-1" \
+        "$base_url/v1/audio/transcriptions")
+    
+    # Clean up compressed file if we created one
+    if [[ "$upload_file" != "$audio_file" ]] && [[ -f "$upload_file" ]]; then
+        rm -f "$upload_file"
+    fi
+    
+    # Check for API error
+    if echo "$response" | jq -e '.error' >/dev/null 2>&1; then
+        echo -e "${RED}API Error:${NC}" >&2
+        echo "$response" | jq -r '.error.message' >&2
+        return 1
+    fi
+    
+    # Extract transcribed text
+    local text=$(echo "$response" | jq -r '.text // empty')
+    if [[ -z "$text" ]]; then
+        echo -e "${RED}No text transcribed${NC}" >&2
+        return 1
+    fi
+    
+    echo "$text"
+}
+
+# Paste text
+paste_text() {
+    local text="$1"
+    
+    if [[ -z "$text" ]]; then
+        return 1
+    fi
+    
+    # Try direct paste first
+    if command -v ydotool >/dev/null && pgrep ydotoold >/dev/null; then
+        ydotool type "$text"
+        echo -e "${GREEN}✓ Text pasted via ydotool${NC}"
+        return 0
+    elif command -v xdotool >/dev/null; then
+        xdotool type --clearmodifiers "$text"
+        echo -e "${GREEN}✓ Text pasted via xdotool${NC}"
+        return 0
+    else
+        # Fallback to clipboard
+        if command -v wl-copy >/dev/null; then
+            echo -n "$text" | wl-copy
+            echo -e "${YELLOW}📋 Text copied to clipboard (wl-copy)${NC}"
+            return 1  # Can't directly type, so return failure for indicator tracking
+        elif command -v xclip >/dev/null; then
+            echo -n "$text" | xclip -selection clipboard
+            echo -e "${YELLOW}📋 Text copied to clipboard (xclip)${NC}"
+            return 1  # Can't directly type, so return failure for indicator tracking
+        else
+            echo -e "${RED}No paste method available${NC}"
+            echo "Install: ydotool (Wayland) or xdotool (X11)"
+            return 1
+        fi
+    fi
+}
+
+# Clear recording indicator and paste transcribed text
+clear_and_paste_text() {
+    local text="$1"
+    
+    if [[ -z "$text" ]]; then
+        return 1
+    fi
+    
+    # Clear the "Speak now" indicator (9 backspaces) and paste transcribed text
+    if command -v ydotool >/dev/null && pgrep ydotoold >/dev/null; then
+        # Send 9 backspaces to clear "Speak now", then type the text
+        for i in {1..9}; do
+            ydotool key BackSpace
+        done
+        ydotool type "$text"
+        echo -e "${GREEN}✓ Text pasted via ydotool${NC}"
+    elif command -v xdotool >/dev/null; then
+        # Send 9 backspaces to clear "Speak now", then type the text
+        for i in {1..9}; do
+            xdotool key --clearmodifiers BackSpace
+        done
+        xdotool type --clearmodifiers "$text"
+        echo -e "${GREEN}✓ Text pasted via xdotool${NC}"
+    else
+        # Fallback: just paste the text (can't clear indicator)
+        paste_text "$text"
+    fi
+}
+
+# Find keyboard device with F24 (with timeout)
+find_keyboard() {
+    local timeout=30
+    local count=0
+    
+    echo "Looking for keyd virtual keyboard..." >&2
+    
+    while [[ $count -lt $timeout ]]; do
+        # First priority: look for keyd virtual keyboard
+        for device in /dev/input/event*; do
+            if [[ -r "$device" ]]; then
+                device_name=$(cat /sys/class/input/$(basename $device)/device/name 2>/dev/null || echo "")
+                if [[ "$device_name" == "keyd virtual keyboard" ]]; then
+                    echo "$device"
+                    return 0
+                fi
+            fi
+        done
+        
+        if [[ $count -eq 0 ]]; then
+            echo "keyd virtual keyboard not found, retrying for ${timeout}s..." >&2
+        fi
+        
+        ((count++))
+        sleep 1
+    done
+    
+    echo -e "${RED}Timeout: keyd virtual keyboard not found after ${timeout}s${NC}" >&2
+    echo "Make sure keyd is running: sudo systemctl status keyd" >&2
+    return 1
+}
+
+# Cleanup function
+cleanup_daemon() {
+    if [[ -n "$RECORD_PID" ]]; then
+        echo -e "\n${YELLOW}Stopping recording...${NC}"
+        kill "$RECORD_PID" 2>/dev/null
+        
+        # Wait for graceful termination
+        for i in {1..5}; do
+            if ! kill -0 "$RECORD_PID" 2>/dev/null; then
+                break
+            fi
+            sleep 0.2
+        done
+        
+        # Force kill if still running
+        if kill -0 "$RECORD_PID" 2>/dev/null; then
+            kill -9 "$RECORD_PID" 2>/dev/null
+        fi
+    fi
+    echo -e "\n${GREEN}Push2Type daemon stopped${NC}"
+}
+
+# Setup environment and validate configuration
+setup_environment() {
+    echo "Push2Type - Voice Transcription Daemon"
+    echo "======================================"
+    
+    # Initialize
+    check_deps
+    check_api_key
+    mkdir -p "$RECORDINGS_DIR"
+    
+    # Find keyboard device
+    if [[ -z "$KEYBOARD_DEVICE" ]]; then
+        KEYBOARD_DEVICE=$(find_keyboard)
+        if [[ -z "$KEYBOARD_DEVICE" ]]; then
+            echo "Error: No keyboard device found"
+            echo "Make sure keyd is running and CapsLock is mapped to F24"
+            echo "Or manually set: export KEYBOARD_DEVICE=/dev/input/eventX"
+            exit 1
+        fi
+        
+        device_name=$(cat /sys/class/input/$(basename $KEYBOARD_DEVICE)/device/name 2>/dev/null || echo "")
+        echo "Found keyboard: $KEYBOARD_DEVICE ($device_name)"
+    else
+        echo "Using specified keyboard device: $KEYBOARD_DEVICE"
+    fi
+    
+    echo "Monitoring keyboard: $KEYBOARD_DEVICE"
+    echo "Press CapsLock to start/stop recording"
+    
+    # Validate keyboard access
+    if [[ ! -r "$KEYBOARD_DEVICE" ]]; then
+        echo "Error: Cannot read $KEYBOARD_DEVICE"
+        echo "Try running as root or add user to input group"
+        exit 1
+    fi
+    
+    echo "Waiting for events..."
+    echo -n "🎤 "
+}
+
+# Handle key press (start recording)
+handle_key_press() {
+    if [[ "$RECORDING" == "false" ]]; then
+        RECORDING=true
+        TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+        AUDIO_FILE="$RECORDINGS_DIR/recording_$TIMESTAMP.wav"
+        
+        echo "🎤 Recording started"
+        echo "📁 Audio file: $AUDIO_FILE"
+        if command -v notify-send >/dev/null; then
+            notify-send "Push2Type" "Recording started..." &
+        fi
+        
+        # Paste recording indicator to show recording has started
+        if paste_text "Speak now"; then
+            PASTED_INDICATOR=true
+        else
+            PASTED_INDICATOR=false
+        fi
+        
+        # Start recording (suppress stderr to avoid "Terminated" message)
+        arecord -D "$AUDIO_DEVICE" -f S16_LE -r "$SAMPLE_RATE" -c 1 -t wav "$AUDIO_FILE" 2>/dev/null &
+        RECORD_PID=$!
+    fi
+}
+
+# Handle key release (stop recording and process)
+handle_key_release() {
+    if [[ "$RECORDING" == "true" ]] && [[ -n "$RECORD_PID" ]]; then
+        RECORDING=false
+        
+        echo "⏹️  Recording stopped"
+        if command -v notify-send >/dev/null; then
+            notify-send "Push2Type" "Processing..." &
+        fi
+        
+        # Stop recording
+        kill "$RECORD_PID" 2>/dev/null
+        
+        # Wait with timeout
+        for i in {1..5}; do
+            if ! kill -0 "$RECORD_PID" 2>/dev/null; then
+                break
+            fi
+            sleep 0.2
+        done
+        
+        # Force kill if still running
+        if kill -0 "$RECORD_PID" 2>/dev/null; then
+            kill -9 "$RECORD_PID" 2>/dev/null
+        fi
+        
+        # Wait for file to be written
+        sleep 1
+        
+        # Check file and process
+        if [[ -f "$AUDIO_FILE" ]]; then
+            FILE_SIZE=$(stat -c%s "$AUDIO_FILE" 2>/dev/null || echo 0)
+            
+            if [[ $FILE_SIZE -gt 1000 ]]; then
+                # Transcribe audio
+                TEXT=$(transcribe_audio "$AUDIO_FILE")
+                
+                if [[ -n "$TEXT" ]]; then
+                    # Truncate text for display (max 50 chars)
+                    if [[ ${#TEXT} -gt 50 ]]; then
+                        DISPLAY_TEXT="${TEXT:0:47}..."
+                    else
+                        DISPLAY_TEXT="$TEXT"
+                    fi
+                    
+                    echo -e "\r${GREEN}📝 Transcribed:${NC} $DISPLAY_TEXT"
+                    echo -n "🎤 "
+                    
+                    # Save transcription to .txt file
+                    TEXT_FILE="${AUDIO_FILE%.wav}.txt"
+                    echo "$TEXT" > "$TEXT_FILE"
+                    echo "💾 Text file: $TEXT_FILE"
+                    
+                    # Clear the recording indicator and paste transcribed text
+                    if [[ "$PASTED_INDICATOR" == "true" ]]; then
+                        clear_and_paste_text "$TEXT"
+                    else
+                        paste_text "$TEXT"
+                    fi
+                    if command -v notify-send >/dev/null; then
+                        notify-send "Push2Type" "Transcribed: $DISPLAY_TEXT" &
+                    fi
+                else
+                    echo -e "\r❌ No text transcribed"
+                    echo -n "🎤 "
+                    if command -v notify-send >/dev/null; then
+                        notify-send "Push2Type" "No speech detected" &
+                    fi
+                fi
+            else
+                echo -e "\r❌ Audio file too small: $FILE_SIZE bytes"
+                echo -n "🎤 "
+            fi
+        else
+            echo -e "\r❌ Audio file not found: $AUDIO_FILE"
+            echo -n "🎤 "
+        fi
+        
+        RECORD_PID=""
+        AUDIO_FILE=""
+    fi
+}
+
+# Monitor keyboard events
+monitor_keyboard() {
+    while read -r line; do
+        # Check for F24 key events
+        if echo "$line" | grep -q "KEY_F24"; then
+            if echo "$line" | grep -q "value 1\|value 2"; then
+                # Key pressed or repeating - start recording
+                handle_key_press
+            elif echo "$line" | grep -q "value 0"; then
+                # Key released - stop recording
+                handle_key_release
+            fi
+        fi
+    done < <(evtest "$KEYBOARD_DEVICE" 2>/dev/null)
+}
+
+# Test mode for debugging
+test_mode() {
+    echo "Push2Type - Test Mode"
+    echo "===================="
+    
+    check_deps
+    check_api_key
+    mkdir -p "$RECORDINGS_DIR"
+    
+    echo "✓ Dependencies check passed"
+    echo "✓ API key configured"
+    echo "✓ Recordings directory: $RECORDINGS_DIR"
+    
+    # Test audio recording
+    echo ""
+    echo "Testing audio recording..."
+    echo "Recording 2 seconds of test audio..."
+    
+    local test_file="$RECORDINGS_DIR/test_$(date +%Y%m%d_%H%M%S).wav"
+    arecord -D "$AUDIO_DEVICE" -f S16_LE -r "$SAMPLE_RATE" -c 1 -t wav "$test_file" &
+    local record_pid=$!
+    sleep 2
+    kill $record_pid 2>/dev/null
+    wait $record_pid 2>/dev/null
+    
+    if [[ -f "$test_file" ]]; then
+        local file_size=$(stat -c%s "$test_file" 2>/dev/null || echo 0)
+        if [[ $file_size -gt 1000 ]]; then
+            echo "✓ Audio recording works (${file_size} bytes)"
+            echo "Test file: $test_file"
+            
+            # Optional: test transcription
+            echo ""
+            echo -n "Test transcription? [y/N] "
+            read -r test_transcribe
+            if [[ "$test_transcribe" =~ ^[Yy]$ ]]; then
+                echo "Transcribing test audio..."
+                local text=$(transcribe_audio "$test_file")
+                if [[ -n "$text" ]]; then
+                    echo "✓ Transcription works: $text"
+                else
+                    echo "✗ Transcription failed"
+                fi
+            fi
+        else
+            echo "✗ Audio file too small - check microphone"
+        fi
+    else
+        echo "✗ Audio recording failed"
+    fi
+}
+
+# Variables for recording state
+RECORDING=false
+RECORD_PID=""
+AUDIO_FILE=""
+PASTED_INDICATOR=false
+
+# Signal handlers
+trap cleanup_daemon EXIT TERM INT
+
+# Main function
+main() {
+    case "${1}" in
+        "-d"|"--daemon"|"daemon")
+            setup_environment
+            monitor_keyboard
+            ;;
+        "test")
+            test_mode
+            ;;
+        "")
+            setup_environment
+            monitor_keyboard
+            ;;
+        "-h"|"--help"|"help")
+            echo "Usage: $0 [OPTIONS]"
+            echo ""
+            echo "OPTIONS:"
+            echo "  (none)          Run interactively in terminal (default)"
+            echo "  -d, --daemon    Run as background daemon"
+            echo "  test            Test audio and transcription"
+            echo "  -h, --help      Show this help"
+            exit 0
+            ;;
+        *)
+            echo "Usage: $0 [OPTIONS]"
+            echo "Use '$0 --help' for more information"
+            exit 1
+            ;;
+    esac
+}
+
+# Run main function if executed directly
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

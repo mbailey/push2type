@@ -1,0 +1,26 @@
+[Unit]
+Description=Push2Type Voice Transcription Service
+Documentation=https://github.com/mbailey/push2type
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/Code/github.com/mbailey/mt-public/packages/push2type/push2type --daemon
+Restart=on-failure
+RestartSec=5
+WorkingDirectory=%h/Code/github.com/mbailey/mt-public/packages/push2type
+
+# Environment variables
+Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=%h/.config/push2type/environment
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
