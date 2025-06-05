@@ -2,10 +2,6 @@
 
 Simple push-to-talk voice transcription for Linux. Hold CapsLock to record, release to transcribe and paste text anywhere.
 
-## Questions
-
-- What is the best audio format to use on fedora: Opus or mp3?
-
 ## Features
 
 - 🎤 **CapsLock as push-to-talk** - Hold to record, release to transcribe
