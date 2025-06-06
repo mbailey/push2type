@@ -13,39 +13,43 @@ Simple push-to-talk voice transcription for Linux. Hold CapsLock to record, rele
 
 ## Quick Start
 
-1. **Install dependencies:**
+1. **Run setup:**
 
    ```bash
-   # Fedora/RHEL
-   sudo dnf install alsa-utils evtest jq curl
-
-   # Ubuntu/Debian
-   sudo apt install alsa-utils evtest jq curl
-   ```
-
-2. **Run setup:**
-
-   ```bash
+   # Clone and run
+   git clone https://github.com/mbailey/push2type.git
+   cd push2type
    ./setup.sh
    ```
 
-3. **Set your API key:**
-
+   Or run directly:
    ```bash
-   export OPENAI_API_KEY='your-openai-api-key'
+   curl -sSL https://raw.githubusercontent.com/mbailey/push2type/master/setup.sh | bash
    ```
 
-4. **Start the daemon:**
+   This will install all required dependencies and configure your system.
+
+2. **API key configuration:**
+
+   The setup script will prompt for your OpenAI API key and save it to `~/.config/push2type/environment`.
+   
+   If you need to update it later:
+   ```bash
+   echo "OPENAI_API_KEY=your-openai-api-key" > ~/.config/push2type/environment
+   chmod 600 ~/.config/push2type/environment
+   ```
+
+3. **Start the daemon:**
 
    ```bash
-   # Run directly
-   ./push2type
-
-   # Or as systemd service (if installed during setup)
+   # As systemd service (recommended)
    systemctl --user start push2type
+
+   # Or run directly
+   push2type
    ```
 
-5. **Use it:**
+4. **Use it:**
    - Hold **CapsLock** to record
    - Release **CapsLock** to transcribe and paste
 
@@ -61,7 +65,7 @@ Simple push-to-talk voice transcription for Linux. Hold CapsLock to record, rele
 
 - `push2type` - Complete daemon (CapsLock monitoring, recording, transcription)
 - `setup.sh` - Installation script  
-- `config/dot-config/systemd/user/push2type.service` - systemd service file
+- `push2type.service` - systemd service file
 
 ## Requirements
 
@@ -107,6 +111,23 @@ ls -la /dev/input/event*
 
 Recordings are saved to `~/push2type_recordings/`
 
+## Auto-start on Login
+
+To have push2type start automatically when you log in:
+
+```bash
+# Enable and start the service
+systemctl --user enable --now push2type
+
+# Verify it's running
+systemctl --user status push2type
+```
+
+To disable auto-start:
+```bash
+systemctl --user disable push2type
+```
+
 ## Configuration
 
 ### Custom API endpoint
@@ -119,7 +140,7 @@ export OPENAI_BASE_URL='http://localhost:8080'  # For local Whisper
 
 ```bash
 export KEYBOARD_DEVICE='/dev/input/event18'
-./push2type
+push2type
 ```
 
 ### Systemd service management
@@ -129,11 +150,33 @@ export KEYBOARD_DEVICE='/dev/input/event18'
 systemctl --user start push2type     # Start service
 systemctl --user stop push2type      # Stop service
 systemctl --user status push2type    # Check status
-systemctl --user enable push2type    # Auto-start on login
-systemctl --user disable push2type   # Disable auto-start
+systemctl --user restart push2type   # Restart service
 
 # View logs
 journalctl --user -u push2type -f
+```
+
+## Uninstalling
+
+To remove push2type from your system:
+
+```bash
+# Stop and disable the service (if installed)
+systemctl --user stop push2type
+systemctl --user disable push2type
+
+# Remove files
+rm -f ~/.local/bin/push2type
+rm -f ~/.config/systemd/user/push2type.service
+rm -rf ~/.config/push2type
+rm -rf ~/push2type_recordings
+
+# Remove keyd configuration
+sudo rm -f /etc/keyd/default.conf
+sudo systemctl restart keyd
+
+# Remove user from input group (optional)
+sudo gpasswd -d $USER input
 ```
 
 ## License

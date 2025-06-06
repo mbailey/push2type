@@ -18,6 +18,11 @@ YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Load environment file if it exists
+if [[ -f "$HOME/.config/push2type/environment" ]]; then
+    source "$HOME/.config/push2type/environment"
+fi
+
 # Check dependencies
 check_deps() {
     local missing=()

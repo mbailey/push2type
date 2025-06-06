@@ -19,18 +19,36 @@ fi
 
 # 1. Install dependencies
 echo -e "\n${YELLOW}Installing dependencies...${NC}"
-sudo dnf install -y alsa-utils evtest jq curl
 
-# Optional: Install audio compression for faster uploads
-echo -e "\n${YELLOW}Installing optional audio compression (recommended)...${NC}"
-sudo dnf install -y lame || echo "Warning: lame not available - uploads will be slower"
+# Detect distro
+if command -v dnf >/dev/null; then
+  # Fedora/RHEL
+  sudo dnf install -y alsa-utils evtest jq curl
+  # Optional: Install audio compression for faster uploads
+  echo -e "\n${YELLOW}Installing optional audio compression (recommended)...${NC}"
+  sudo dnf install -y lame || echo "Warning: lame not available - uploads will be slower"
+elif command -v apt-get >/dev/null; then
+  # Ubuntu/Debian
+  sudo apt-get update
+  sudo apt-get install -y alsa-utils evtest jq curl
+  # Optional: Install audio compression for faster uploads
+  echo -e "\n${YELLOW}Installing optional audio compression (recommended)...${NC}"
+  sudo apt-get install -y lame || echo "Warning: lame not available - uploads will be slower"
+else
+  echo -e "${RED}Unsupported distribution. Please install manually: alsa-utils evtest jq curl lame${NC}"
+  exit 1
+fi
 
 # 2. Install keyd if not present
 if ! command -v keyd >/dev/null; then
   echo -e "\n${YELLOW}Installing keyd...${NC}"
 
   # Install build deps
-  sudo dnf install -y git make gcc kernel-headers
+  if command -v dnf >/dev/null; then
+    sudo dnf install -y git make gcc kernel-headers
+  elif command -v apt-get >/dev/null; then
+    sudo apt-get install -y git make gcc linux-headers-$(uname -r)
+  fi
 
   # Build and install keyd
   cd /tmp
@@ -137,7 +155,24 @@ if [[ -f /tmp/audio_test.wav ]]; then
   FILE_SIZE=$(stat -c%s /tmp/audio_test.wav)
   if [[ $FILE_SIZE -gt 1000 ]]; then
     echo -e "${GREEN}✓ Audio recording works (${FILE_SIZE} bytes)${NC}"
-    echo "Test file: /tmp/audio_test.wav (play with: mpv /tmp/audio_test.wav)"
+    
+    # Offer to play back the recording
+    echo -n "Play back the test recording? [y/N] "
+    read -r play_audio
+    if [[ "$play_audio" =~ ^[Yy]$ ]]; then
+      # Try different audio players
+      if command -v aplay >/dev/null; then
+        aplay /tmp/audio_test.wav 2>/dev/null
+      elif command -v mpv >/dev/null; then
+        mpv --no-video /tmp/audio_test.wav 2>/dev/null
+      elif command -v ffplay >/dev/null; then
+        ffplay -nodisp -autoexit /tmp/audio_test.wav 2>/dev/null
+      elif command -v paplay >/dev/null; then
+        paplay /tmp/audio_test.wav 2>/dev/null
+      else
+        echo "No audio player found. Test file saved at: /tmp/audio_test.wav"
+      fi
+    fi
   else
     echo -e "${RED}✗ Audio file too small - check microphone${NC}"
   fi
@@ -145,9 +180,26 @@ else
   echo -e "${RED}✗ Audio recording failed${NC}"
 fi
 
-# 7. Install scripts
-echo -e "\n${YELLOW}Making scripts executable...${NC}"
+# 7. Install binary
+echo -e "\n${YELLOW}Installing push2type binary...${NC}"
+
+# Make executable
 chmod +x push2type
+
+# Install to ~/.local/bin (XDG standard for user binaries)
+mkdir -p "$HOME/.local/bin"
+
+# Create symlink (allows easy updates from git repo)
+ln -sf "$PWD/push2type" "$HOME/.local/bin/push2type"
+
+echo -e "${GREEN}✓ Installed to ~/.local/bin/push2type${NC}"
+
+# Check if ~/.local/bin is in PATH
+if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+  echo -e "${YELLOW}Note: ~/.local/bin is not in your PATH${NC}"
+  echo "Add this to your ~/.bashrc or ~/.bash_profile:"
+  echo 'export PATH="$HOME/.local/bin:$PATH"'
+fi
 
 # 8. Optional systemd service setup
 echo -e "\n${YELLOW}Systemd service setup (optional)${NC}"
@@ -191,13 +243,13 @@ if [[ "$NEED_RELOGIN" == "true" ]]; then
   echo -e "1. ${RED}LOGOUT AND LOGIN AGAIN${NC} (for input group)"
 fi
 echo "2. Verify API key is set: cat ~/.config/push2type/environment"
-echo "3. Test manually: ./push2type"
+echo "3. Test manually: push2type"
 
 if [[ "$install_service" =~ ^[Yy]$ ]]; then
   echo "4. Start service: systemctl --user start push2type"
   echo "   Or logout/login to start automatically"
 else
-  echo "4. Run daemon: ./push2type"
+  echo "4. Run daemon: push2type"
 fi
 
 echo

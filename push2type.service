@@ -5,10 +5,9 @@ After=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=%h/Code/github.com/mbailey/mt-public/packages/push2type/push2type --daemon
+ExecStart=%h/.local/bin/push2type --daemon
 Restart=on-failure
 RestartSec=5
-WorkingDirectory=%h/Code/github.com/mbailey/mt-public/packages/push2type
 
 # Environment variables
 Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
