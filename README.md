@@ -75,6 +75,10 @@ Simple push-to-talk voice transcription for Linux. Hold CapsLock to record, rele
 
 ## Troubleshooting
 
+### WSL (Windows Subsystem for Linux)
+
+If you're using WSL and CapsLock isn't triggering recordings, see [wsl.md](wsl.md) for WSL-specific setup instructions.
+
 ### CapsLock not working
 
 ```bash
