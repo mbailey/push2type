@@ -147,6 +147,13 @@ export KEYBOARD_DEVICE='/dev/input/event18'
 push2type
 ```
 
+### Minimum hold time
+
+```bash
+export MIN_HOLD_TIME='0.5'  # Require 0.5 seconds hold (default: 0.3)
+push2type
+```
+
 ### Systemd service management
 
 ```bash

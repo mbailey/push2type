@@ -10,6 +10,7 @@ AUDIO_DEVICE="${AUDIO_DEVICE:-default}"
 SAMPLE_RATE="${SAMPLE_RATE:-44100}"
 AUDIO_FORMAT="${AUDIO_FORMAT:-wav}"
 COMPRESS_AUDIO="${COMPRESS_AUDIO:-true}"  # Enable audio compression for faster uploads
+MIN_HOLD_TIME="${MIN_HOLD_TIME:-0.3}"    # Minimum seconds to hold CapsLock before activating
 
 # Colors for output
 RED='\033[0;31m'
@@ -306,7 +307,7 @@ setup_environment() {
     fi
     
     echo "Monitoring keyboard: $KEYBOARD_DEVICE"
-    echo "Press CapsLock to start/stop recording"
+    echo "Hold CapsLock for ${MIN_HOLD_TIME}s to start recording"
     
     # Validate keyboard access
     if [[ ! -r "$KEYBOARD_DEVICE" ]]; then
@@ -322,31 +323,48 @@ setup_environment() {
 # Handle key press (start recording)
 handle_key_press() {
     if [[ "$RECORDING" == "false" ]]; then
-        RECORDING=true
-        TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-        AUDIO_FILE="$RECORDINGS_DIR/recording_$TIMESTAMP.wav"
+        # Start timer for minimum hold time
+        KEY_PRESS_TIME=$(date +%s.%N)
+        RECORDING="pending"
         
-        echo "🎤 Recording started"
-        echo "📁 Audio file: $AUDIO_FILE"
-        if command -v notify-send >/dev/null; then
-            notify-send "Push2Type" "Recording started..." &
-        fi
-        
-        # Paste recording indicator to show recording has started
-        if paste_text "Speak now"; then
-            PASTED_INDICATOR=true
-        else
-            PASTED_INDICATOR=false
-        fi
-        
-        # Start recording (suppress stderr to avoid "Terminated" message)
-        arecord -D "$AUDIO_DEVICE" -f S16_LE -r "$SAMPLE_RATE" -c 1 -t wav "$AUDIO_FILE" 2>/dev/null &
-        RECORD_PID=$!
+        echo "🎤 Hold for ${MIN_HOLD_TIME}s to activate..."
     fi
+}
+
+# Start actual recording after minimum hold time
+start_recording() {
+    RECORDING=true
+    TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+    AUDIO_FILE="$RECORDINGS_DIR/recording_$TIMESTAMP.wav"
+    
+    echo "🎤 Recording started"
+    echo "📁 Audio file: $AUDIO_FILE"
+    if command -v notify-send >/dev/null; then
+        notify-send "Push2Type" "Recording started..." &
+    fi
+    
+    # Paste recording indicator to show recording has started
+    if paste_text "Speak now"; then
+        PASTED_INDICATOR=true
+    else
+        PASTED_INDICATOR=false
+    fi
+    
+    # Start recording (suppress stderr to avoid "Terminated" message)
+    arecord -D "$AUDIO_DEVICE" -f S16_LE -r "$SAMPLE_RATE" -c 1 -t wav "$AUDIO_FILE" 2>/dev/null &
+    RECORD_PID=$!
 }
 
 # Handle key release (stop recording and process)
 handle_key_release() {
+    if [[ "$RECORDING" == "pending" ]]; then
+        # Released before minimum hold time - cancel
+        echo "⚡ Released too quickly - cancelled"
+        RECORDING="false"
+        KEY_PRESS_TIME=""
+        return
+    fi
+    
     if [[ "$RECORDING" == "true" ]] && [[ -n "$RECORD_PID" ]]; then
         RECORDING=false
         
@@ -430,15 +448,30 @@ handle_key_release() {
 
 # Monitor keyboard events
 monitor_keyboard() {
+    # Initialize state
+    RECORDING="false"
+    KEY_PRESS_TIME=""
+    RECORD_PID=""
+    
     while read -r line; do
         # Check for F24 key events
         if echo "$line" | grep -q "KEY_F24"; then
-            if echo "$line" | grep -q "value 1\|value 2"; then
-                # Key pressed or repeating - start recording
+            if echo "$line" | grep -q "value 1"; then
+                # Key pressed - start timer
                 handle_key_press
             elif echo "$line" | grep -q "value 0"; then
-                # Key released - stop recording
+                # Key released - check timing or stop recording
                 handle_key_release
+            fi
+        fi
+        
+        # Check if we should start recording (minimum hold time reached)
+        if [[ "$RECORDING" == "pending" ]] && [[ -n "$KEY_PRESS_TIME" ]]; then
+            local current_time=$(date +%s.%N)
+            local hold_duration=$(echo "$current_time - $KEY_PRESS_TIME" | bc -l 2>/dev/null || echo "0")
+            
+            if (( $(echo "$hold_duration >= $MIN_HOLD_TIME" | bc -l 2>/dev/null || echo "0") )); then
+                start_recording
             fi
         fi
     done < <(evtest "$KEYBOARD_DEVICE" 2>/dev/null)
